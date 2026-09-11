@@ -57,8 +57,6 @@ reference-config-file: /etc/suricata/reference.config
 rule-files:
   - suricata_a1.rules
   - suricata_a4.rules
-  - emerging-exploit.rules
-  - emerging-trojan.rules
 
 # === Stream Reassembly ===
 stream:

@@ -6,26 +6,27 @@
 
 - Docker & Docker Compose (for infrastructure)
 - `nmap`, `hping3`, `stress-ng` (for attack generation)
-- Python 3.10+ with fish shell
+- Python 3.10+ (bash, zsh, or fish)
 
 ## Setup (One Command)
 
-```fish
+```bash
 # Create venv, install deps, and prepare everything
 make setup
 ```
 
 Or manually:
 
-```fish
+```bash
 # 1. Create virtual environment
 python3 -m venv .venv
 
-# 2. Activate it (fish shell)
-source .venv/bin/activate.fish
+# 2. Activate it
+. .venv/bin/activate          # bash / zsh
+. .venv/bin/activate.fish     # fish
 
 # 3. Install dependencies
-pip install scikit-learn numpy pandas joblib requests pyyaml
+pip install -r requirements.txt
 ```
 
 ## Available Make Commands
@@ -50,7 +51,7 @@ Run `make help` to see all commands, or use these shortcuts:
 
 ## Quick Demo (No Docker Needed)
 
-```fish
+```bash
 # 1. Setup environment
 make setup
 
@@ -66,7 +67,10 @@ make run-pipeline
 
 ## With Docker Infrastructure
 
-```fish
+```bash
+# 0. Provide the DB password (copy .env.example to .env)
+cp .env.example .env
+
 # 1. Start the simulated VPC (Web, DB, Suricata, ML, Attacker)
 make docker-up
 
@@ -82,7 +86,7 @@ make docker-down
 
 ## Running Individual Attack Scripts
 
-```fish
+```bash
 # Port scan against web server
 python3 scripts/port_scan.py --target 10.0.2.10 --ports 1-1000
 
@@ -98,7 +102,7 @@ python3 scripts/attack_automation.py --all --duration 60
 
 ## ML Detector
 
-```fish
+```bash
 # Train model on synthetic data
 python3 ml/ml_detector.py --mode train --model-type hybrid --train-samples 11000
 
@@ -126,25 +130,32 @@ python3 scripts/feature_extractor.py --interface eth0 --backend scapy --duration
 .
 ├── Makefile                  # All commands with documentation
 ├── .gitignore               # Git ignore rules
+├── .env.example             # Template for required secrets (DB password)
+├── pytest.ini               # Test runner configuration
 ├── requirements.txt         # Python dependencies
 ├── PROGRESS.md              # Progress tracker
 ├── config/
-│   └── suricata.yaml        # Suricata IPS configuration
+│   ├── suricata.yaml        # Suricata IPS configuration
+│   └── attacks.yaml         # Attack vector definitions (7 vectors)
 ├── docs/
-│   └── research_paper.md    # Full research paper (377 lines)
+│   ├── research_paper.md    # Full research paper (377 lines)
+│   └── case_study.md        # Teaching case study
 ├── infra/
-│   └── docker-compose.yml   # VPC topology (5 services)
+│   └── docker-compose.yml   # VPC topology (6 services, bridge networks)
 ├── ml/
+│   ├── Dockerfile           # ML engine image build
 │   └── ml_detector.py       # Isolation Forest / Random Forest daemon
 ├── rules/
 │   ├── suricata_a1.rules    # 18 Network attack rules (A1a, A1b, A1c)
 │   └── suricata_a4.rules    # 33 Application attack rules (A4a, A4b, A4c)
 ├── scripts/
+│   ├── Dockerfile           # Feature extractor image build
 │   ├── attack_automation.py # Centralized orchestrator
 │   ├── feature_extractor.py # Flow feature pipeline
 │   ├── port_scan.py         # Nmap automation (A1a)
 │   ├── http_flood.py        # hping3 DoS (A1)
 │   └── web_attack.py        # SQLi/XSS/XXE (A4c)
+├── tests/                   # Pytest smoke + artifact tests
 └── data/                    # Generated results, logs, models
 ```
 

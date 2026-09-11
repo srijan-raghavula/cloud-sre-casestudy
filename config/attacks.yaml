@@ -1,0 +1,71 @@
+# Attack Vector Configuration — Khan (2016) Taxonomy Mapping
+# Consumed by scripts/attack_automation.py --config config/attacks.yaml
+
+attacks:
+  - name: port_scan_syn
+    category: A1a
+    tool: nmap
+    target: 10.0.2.10
+    command: nmap
+    args: ["-sS", "-T4"]
+    ports: "1-1000"
+    rate: 1000
+    duration: 60
+    enabled: true
+
+  - name: http_flood_syn
+    category: A1
+    tool: hping3
+    target: 10.0.2.10
+    command: hping3
+    args: []
+    rate: 1000
+    duration: 60
+    enabled: true
+
+  - name: http_get_flood
+    category: A1
+    tool: python
+    target: 10.0.2.10
+    command: python3
+    args: []
+    rate: 50
+    duration: 60
+    enabled: true
+
+  - name: resource_abuse_cpu
+    category: A2d
+    tool: stress-ng
+    target: 10.0.2.20
+    command: stress-ng
+    args: []
+    rate: 4
+    duration: 60
+    enabled: true
+
+  - name: sqli_union_select
+    category: A4c
+    tool: sqlmap
+    target: 10.0.2.10
+    command: python3
+    args: ["sqli", "/vulnerable"]
+    duration: 60
+    enabled: true
+
+  - name: sqli_or_1_equals_1
+    category: A4c
+    tool: sqlmap
+    target: 10.0.2.10
+    command: python3
+    args: ["sqli", "/vulnerable"]
+    duration: 60
+    enabled: true
+
+  - name: xss_script_injection
+    category: A4c
+    tool: curl
+    target: 10.0.2.10
+    command: python3
+    args: ["xss", "/search"]
+    duration: 60
+    enabled: true

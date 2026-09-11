@@ -3,7 +3,7 @@
 Feature Extraction Pipeline — Real-time Network Flow Feature Extraction
 Reference: Khan (2016) Case Study — Phase 3, Config C (Hybrid ML-IDPS)
 
-Extracts 5 key flow features from live packet capture using PyShark/scapy
+Extracts 12 key flow features from live packet capture using PyShark/scapy
 for real-time ML anomaly detection.
 
 Features extracted:

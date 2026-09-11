@@ -23,7 +23,7 @@ venv: ## Create Python virtual environment (.venv)
 	@echo "[SETUP] Creating virtual environment..."
 	python3 -m venv .venv
 	@echo "[SETUP] Virtual environment created at .venv/"
-	@echo "[SETUP] Activate with: source .venv/bin/activate.fish"
+	@echo "[SETUP] Activate with: . .venv/bin/activate (bash/zsh) or . .venv/bin/activate.fish (fish)"
 
 # ──────────────────────────────────────────────────────────
 # Install Dependencies
@@ -163,8 +163,8 @@ clean: ## Remove all generated data, results, and cached files
 # ──────────────────────────────────────────────────────────
 # Quick Setup (One Command)
 # ──────────────────────────────────────────────────────────
-setup: clean install venv ## Full fresh setup: clean workspace, create venv, install deps
+setup: clean venv install ## Full fresh setup: clean workspace, create venv, install deps
 	@echo "[SETUP] Complete! Ready to run experiments."
-	@echo "  Activate: source .venv/bin/activate.fish"
+	@echo "  Activate: . .venv/bin/activate (bash/zsh) or . .venv/bin/activate.fish (fish)"
 	@echo "  Start infra: make docker-up"
 	@echo "  Run attacks: make run-all-attacks"

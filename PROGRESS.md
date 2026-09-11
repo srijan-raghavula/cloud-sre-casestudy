@@ -72,7 +72,7 @@
 | `PROGRESS.md` | ✅ | This progress tracker |
 
 ## Statistics
-- Total source files: 13
+- Total source files: 16
 - Suricata rules: 51 (18 A1 + 33 A4)
 - Attack vectors: 7 (port_scan, http_syn, http_get, resource_abuse, sqli, xss, xxe)
 - ML features: 12 per flow

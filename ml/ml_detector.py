@@ -601,8 +601,9 @@ class SyntheticDataGenerator:
         y = np.array([0] * n_benign + [1] * n_attack)  # 0=benign, 1=attack
 
         # Shuffle
+        rng = np.random.RandomState(42)
         indices = np.arange(len(X))
-        np.random.shuffle(indices)
+        rng.shuffle(indices)
         return X[indices], y[indices]
 
 
@@ -650,7 +651,7 @@ def main():
     if args.mode == "train":
         print("[ML DETECTOR] Training model...")
         X, y = SyntheticDataGenerator.generate_dataset(
-            n_benign=args.train_samples // 10, n_attack=args.train_samples // 10
+            n_benign=args.train_samples, n_attack=max(1, args.train_samples // 10)
         )
         trainer = ModelTrainer(model_type=args.model_type)
         X_train, X_test, y_train, y_test = train_test_split(
@@ -715,8 +716,8 @@ def main():
             "avg_latency_ms": round(avg_latency, 2),
             "p95_latency_ms": round(p95_latency, 2),
             "p99_latency_ms": round(p99_latency, 2),
-            "accuracy": round(accuracy, 4),
-            "target_latency_met": avg_latency < 50,
+            "accuracy": round(float(accuracy), 4),
+            "target_latency_met": bool(avg_latency < 50),
             "training_samples": len(X_train),
             "test_samples": len(X_test),
             "timestamp": datetime.now().isoformat(),
