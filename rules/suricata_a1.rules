@@ -1,0 +1,77 @@
+# Suricata IPS Rules — A1 Network Attack Vectors
+# Reference: Khan (2016) Taxonomy — Network Attacks (A1)
+# Deploy with: suricata -c /etc/suricata/suricata.yaml -S rules/suricata_a1.rules
+
+# ============================================================
+# A1a: Port Scanning Detection
+# ============================================================
+
+# SYN scan detection — rapid SYN packets to many ports from single source
+alert tcp any any -> 10.0.2.10 80 (msg:"A1a Port Scan — SYN Flood to Multiple Ports"; flags:S; threshold:type both, track by_src, count 50, seconds 5; sid:1000001; rev:2;)
+
+# SYN scan detection — targeted at web server across high port range
+alert tcp any any -> 10.0.2.10 any (msg:"A1a Port Scan — Connect Scan Detected"; flags:S; content:"|02|"; depth:1; threshold:type both, track by_src, count 100, seconds 10; sid:1000002; rev:1;)
+
+# ACK scan detection
+alert tcp any any -> 10.0.2.10 any (msg:"A1a Port Scan — ACK Scan Detected"; flags:A; threshold:type both, track by_src, count 50, seconds 5; sid:1000003; rev:1;)
+
+# Xmas scan detection
+alert tcp any any -> 10.0.2.10 any (msg:"A1a Port Scan — Xmas Scan Detected"; flags:FIN,URG,PSH; threshold:type both, track by_src, count 20, seconds 5; sid:1000004; rev:1;)
+
+# Nmap NULL scan detection
+alert tcp any any -> 10.0.2.10 any (msg:"A1a Port Scan — NULL Scan Detected"; flags:None; threshold:type both, track by_src, count 20, seconds 5; sid:1000005; rev:1;)
+
+# ============================================================
+# A1b: Botnet / Command-and-Control Detection
+# ============================================================
+
+# Detect potential C2 beaconing — periodic connections to external IPs
+alert tcp any any -> any any (msg:"A1b Botnet — Periodic C2 Beacon Detected"; flow:to_server; threshold:type threshold, track by_src, count 3, seconds 60; sid:1000010; rev:1;)
+
+# Detect known botnet C2 server connections (emerging threats)
+alert tcp any any -> any any (msg:"A1b Botnet — Known C2 Server Connection"; reference:entity,pti; classtype:trojan-activity; sid:1000011; rev:1;)
+
+# High volume outbound connections indicative of botnet propagation
+alert tcp any any -> any any (msg:"A1b Botnet — High Volume Outbound Connections"; flags:SYN; threshold:type both, track by_src, count 200, seconds 10; sid:1000012; rev:1;)
+
+# ============================================================
+# A1c: Spoofing Detection
+# ============================================================
+
+# ARP spoofing detection (passive)
+alert arp any any -> any any (msg:"A1c Spoofing — ARP Poisoning Detected"; content:"|01 02|"; depth:2; threshold:type both, track by_src, count 5, seconds 5; sid:1000020; rev:1;)
+
+# IP spoofing — packets from private IP ranges on external interfaces
+alert ip any any -> any any (msg:"A1c Spoofing — Private IP on External Interface"; ipopts:rr; sid:1000021; rev:1;)
+
+# Detect SYN floods with spoofed source IPs
+alert tcp any any -> 10.0.2.10 80 (msg:"A1c Spoofing — SYN Flood with Spoofed Source"; flags:S; threshold:type threshold, track by_dst, count 1000, seconds 5; sid:1000022; rev:1;)
+
+# ============================================================
+# A1: HTTP DDoS / DoS Detection
+# ============================================================
+
+# HTTP GET flood detection
+alert http any any -> 10.0.2.10 80 (msg:"A1 DoS — HTTP GET Flood Detected"; content:"GET"; threshold:type threshold, track by_src, count 200, seconds 10; sid:1000030; rev:2;)
+
+# HTTP POST flood detection
+alert http any any -> 10.0.2.10 80 (msg:"A1 DoS — HTTP POST Flood Detected"; content:"POST"; threshold:type threshold, track by_src, count 100, seconds 10; sid:1000031; rev:1;)
+
+# TCP SYN flood without completion
+alert tcp any any -> 10.0.2.10 80 (msg:"A1 DoS — TCP SYN Flood Detected"; flags:S; threshold:type both, track by_dst, count 500, seconds 5; sid:1000032; rev:2;)
+
+# Slowloris detection — partial HTTP headers held open
+alert http any any -> 10.0.2.10 80 (msg:"A1 DoS — Slowloris Partial Header Detection"; flow:to_server,established; content:"HTTP"; content:"Host:"; distance:0; within:50; pcre:"/Host:.+/"; threshold:type both, track by_src, count 5, seconds 60; sid:1000033; rev:1;)
+
+# hping3 SYN flood signature
+alert tcp any any -> 10.0.2.10 80 (msg:"A1 DoS — hping3 SYN Flood Pattern"; flags:S; itype:0; threshold:type both, track by_src, count 500, seconds 3; sid:1000034; rev:1;)
+
+# ============================================================
+# A2: VM-Based Attack Detection (partial coverage)
+# ============================================================
+
+# Xen scheduler manipulation — excessive CPU requests
+alert tcp any any -> 10.0.2.20 any (msg:"A2 VM — Resource Abuse Suspicious Pattern"; flow:stateless; threshold:type both, track by_src, count 1000, seconds 5; sid:1000040; rev:1;)
+
+# VM migration detection — unexpected large data transfers
+alert tcp any any -> 10.0.2.20 any (msg:"A2 VM — Unusual Migration Traffic Detected"; flow:to_server; byte_test:4,>,10485760,0,relative; sid:1000041; rev:1;)

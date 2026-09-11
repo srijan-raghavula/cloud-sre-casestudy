@@ -1,0 +1,141 @@
+version: '3.8'
+
+services:
+  # ──────────────────────────────────────────────────────────
+  # Attacker Node (Kali-like)
+  # ──────────────────────────────────────────────────────────
+  attacker:
+    image: kalilinux/kali-rolling
+    container_name: attacker-node
+    network_mode: host
+    privileged: true
+    volumes:
+      - ./scripts:/scripts
+      - ./data:/data
+    entrypoint: sleep infinity
+    depends_on:
+      - web-server
+      - db-server
+    networks:
+      vpc-subnet-public:
+        ipv4_address: 10.0.1.100
+
+  # ──────────────────────────────────────────────────────────
+  # Security Gateway — Suricata IPS
+  # ──────────────────────────────────────────────────────────
+  security-gateway:
+    image: jasonish/suricata:latest
+    container_name: suricata-ips
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - ./rules:/etc/suricata/rules
+      - ./data/suricata:/var/log/suricata
+      - ./config/suricata.yaml:/etc/suricata/suricata.yaml
+    ports:
+      - "5000:5000"    # Suricata API
+      - "8080:8080"    # EVE JSON log
+    environment:
+      - SURICATA_INTERFACE=eth0
+      - SURICATA_MODE=ips
+      - NFQUEUE_GROUP=1
+    command: >
+      suricata -c /etc/suricata/suricata.yaml
+      -S /etc/suricata/rules/suricata_a1.rules
+      -S /etc/suricata/rules/suricata_a4.rules
+      -l /var/log/suricata
+      --set app-layer.protocols.http.enabled=true
+    depends_on:
+      - web-server
+      - db-server
+    networks:
+      vpc-subnet-app:
+        ipv4_address: 10.0.2.1
+
+  # ──────────────────────────────────────────────────────────
+  # Web Server (Nginx + Vulnerable App)
+  # ──────────────────────────────────────────────────────────
+  web-server:
+    image: vulnerables/web-dvwa
+    container_name: web-server
+    network_mode: host
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DVWA_USERNAME=admin
+      - DVWA_PASSWORD=password
+    volumes:
+      - ./data/nginx_logs:/var/log/nginx
+    networks:
+      vpc-subnet-app:
+        ipv4_address: 10.0.2.10
+
+  # ──────────────────────────────────────────────────────────
+  # Database Server (PostgreSQL)
+  # ──────────────────────────────────────────────────────────
+  db-server:
+    image: postgres:14-alpine
+    container_name: db-server
+    network_mode: host
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: cloudapp
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: securepass123
+    volumes:
+      - ./data/db_data:/var/lib/postgresql/data
+      - ./data/db_logs:/var/log/postgresql
+    networks:
+      vpc-subnet-app:
+        ipv4_address: 10.0.2.20
+
+  # ──────────────────────────────────────────────────────────
+  # ML Detection Engine
+  # ──────────────────────────────────────────────────────────
+  ml-engine:
+    build: ./ml
+    container_name: ml-engine
+    network_mode: host
+    volumes:
+      - ./ml:/app
+      - ./data:/data
+      - ./models:/models
+    command: python3 /app/ml_detector.py --mode detect
+    depends_on:
+      - security-gateway
+    networks:
+      vpc-subnet-app:
+        ipv4_address: 10.0.2.5
+
+  # ──────────────────────────────────────────────────────────
+  # Feature Extractor Node
+  # ──────────────────────────────────────────────────────────
+  feature-extractor:
+    build: ./scripts
+    container_name: feature-extractor
+    network_mode: host
+    volumes:
+      - ./scripts:/app
+      - ./data:/data
+    command: python3 /app/feature_extractor.py --interface eth0 --backend scapy --duration 300
+    depends_on:
+      - security-gateway
+    networks:
+      vpc-subnet-app:
+        ipv4_address: 10.0.2.15
+
+networks:
+  vpc-subnet-public:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.0.1.0/24
+  vpc-subnet-app:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.0.2.0/24

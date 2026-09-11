@@ -1,0 +1,104 @@
+# Suricata IPS Rules — A4 Application Attack Vectors
+# Reference: Khan (2016) Taxonomy — Application Attacks (A4)
+# Deploy with: suricata -c /etc/suricata/suricata.yaml -S rules/suricata_a4.rules
+
+# ============================================================
+# A4a: Malware Injection / Steganography Detection
+# ============================================================
+
+# Detect common malware user-agent strings
+alert http any any -> 10.0.2.10 80 (msg:"A4a Malware — Known Malicious User-Agent"; pcre:"/Mozilla\/5\.0 \(Windows NT 6\.1; WOW64; Trident\/7\.0; rv:11\.0\)/"; sid:1000100; rev:1;)
+
+# Detect suspicious base64 encoded payloads in HTTP
+alert http any any -> 10.0.2.10 80 (msg:"A4a Malware — Base64 Encoded Payload in HTTP Body"; content:"application/x-www-form-urlencoded"; pcre:"/[A-Za-z0-9+\/]{50,}={0,2}/"; sid:1000101; rev:1;)
+
+# Detect PHP shell execution attempts
+alert http any any -> 10.0.2.10 80 (msg:"A4a Malware — PHP Shell Execution Attempt"; content:"cmd="; nocase; content:"|00|"; sid:1000102; rev:1;)
+alert http any any -> 10.0.2.10 80 (msg:"A4a Malware — PHP Shell Execution Attempt"; content:"exec("; nocase; sid:1000103; rev:1;)
+alert http any any -> 10.0.2.10 80 (msg:"A4a Malware — PHP Shell Execution Attempt"; content:"system("; nocase; sid:1000104; rev:1;)
+alert http any any -> 10.0.2.10 80 (msg:"A4a Malware — PHP Shell Execution Attempt"; content:"shell_exec("; nocase; sid:1000105; rev:1;)
+
+# Detect command injection patterns
+alert http any any -> 10.0.2.10 80 (msg:"A4a Malware — Command Injection Detected"; pcre:"/(;|%3B|`|\|\||&&|\\$\()[^\n]{4,}/i"; sid:1000106; rev:1;)
+
+# ============================================================
+# A4b: Shared Architecture Side-Channel Detection
+# ============================================================
+
+# Detect multi-tenant resource contention patterns
+alert http any any -> 10.0.2.10 80 (msg:"A4b Side-Channel — Excessive Concurrent Connections from Single IP"; threshold:type both, track by_src, count 100, seconds 5; sid:1000110; rev:1;)
+
+# Detect attempts to access other tenant's resources
+alert http any any -> 10.0.2.10 80 (msg:"A4b Side-Channel — Path Traversal Attempt"; content:".."; nocase; pcre:"/\.\.\//"; sid:1000111; rev:1;)
+alert http any any -> 10.0.2.10 80 (msg:"A4b Side-Channel — Path Traversal Attempt"; content:"%2e%2e"; nocase; sid:1000112; rev:1;)
+
+# Detect unauthorized file access attempts
+alert http any any -> 10.0.2.10 80 (msg:"A4b Side-Channel — Sensitive File Access Attempt"; content:"/etc/passwd"; nocase; sid:1000113; rev:1;)
+alert http any any -> 10.0.2.10 80 (msg:"A4b Side-Channel — Sensitive File Access Attempt"; content:"/proc/self/environ"; nocase; sid:1000114; rev:1;)
+alert http any any -> 10.0.2.10 80 (msg:"A4b Side-Channel — Sensitive File Access Attempt"; content:"/proc/self/cmdline"; nocase; sid:1000115; rev:1;)
+
+# ============================================================
+# A4c: Web/Protocol Attack Detection (SQLi, XSS, SOAP)
+# ============================================================
+
+# SQL Injection — UNION SELECT
+alert http any any -> 10.0.2.10 80 (msg:"A4c Web Attack — SQL Injection UNION SELECT"; pcre:"/union.*select/i"; sid:1000200; rev:2;)
+
+# SQL Injection — OR 1=1 classic
+alert http any any -> 10.0.2.10 80 (msg:"A4c Web Attack — SQL Injection OR 1=1"; pcre:"/or.*1=1/i"; sid:1000201; rev:2;)
+
+# SQL Injection — comment-based bypass
+alert http any any -> 10.0.2.10 80 (msg:"A4c Web Attack — SQL Injection Comment Bypass"; pcre:"/'.*--|%27.*--|0x[0-9a-f]+/i"; sid:1000202; rev:1;)
+
+# SQL Injection — stacked queries
+alert http any any -> 10.0.2.10 80 (msg:"A4c Web Attack — Stacked SQL Queries"; pcre:"/;.*drop\s+table|;.*insert\s+into|;.*delete\s+from/i"; sid:1000203; rev:1;)
+
+# SQL Injection — information_schema probing
+alert http any any -> 10.0.2.10 80 (msg:"A4c Web Attack — information_schema Probe"; content:"information_schema"; nocase; sid:1000204; rev:1;)
+
+# SQL Injection — mysql.user probing
+alert http any any -> 10.0.2.10 80 (msg:"A4c Web Attack — mysql.user Probe"; content:"mysql.user"; nocase; sid:1000205; rev:1;)
+
+# XSS — Script tag injection
+alert http any any -> 10.0.2.10 80 (msg:"A4c Web Attack — XSS Script Tag Injection"; pcre:"/<script[^>]*>/i"; sid:1000210; rev:2;)
+
+# XSS — JavaScript protocol injection
+alert http any any -> 10.0.2.10 80 (msg:"A4c Web Attack — XSS JavaScript Protocol"; pcre:"/javascript:/i"; sid:1000211; rev:2;)
+
+# XSS — Event handler injection
+alert http any any -> 10.0.2.10 80 (msg:"A4c Web Attack — XSS Event Handler"; pcre:"/on(error|load|click|mouseover|focus)\s*=/i"; sid:1000212; rev:1;)
+
+# XSS — document.cookie stealing attempt
+alert http any any -> 10.0.2.10 80 (msg:"A4c Web Attack — XSS Cookie Theft"; pcre:"/document\.cookie/i"; sid:1000213; rev:1;)
+
+# SOAP Header Manipulation
+alert http any any -> 10.0.2.10 80 (msg:"A4c Web Attack — SOAP Header Tampering"; content:"text/xml"; content:"SOAP"; distance:0; sid:1000220; rev:1;)
+
+# XML External Entity (XXE) injection
+alert http any any -> 10.0.2.10 80 (msg:"A4c Web Attack — XXE Injection Attempt"; pcre:"/<!ENTITY.*SYSTEM/i"; sid:1000221; rev:1;)
+alert http any any -> 10.0.2.10 80 (msg:"A4c Web Attack — XXE Injection Attempt"; pcre:"/<!DOCTYPE.*\[/i"; sid:1000222; rev:1;)
+
+# LDAP injection
+alert http any any -> 10.0.2.10 80 (msg:"A4c Web Attack — LDAP Injection"; pcre:"/\(\|\(|&\(|!\(|%\)/i"; sid:1000223; rev:1;)
+
+# XPath injection
+alert http any any -> 10.0.2.10 80 (msg:"A4c Web Attack — XPath Injection"; pcre:"/'.*or.*'.*=.*'|\"or\".*\"=/i"; sid:1000224; rev:1;)
+
+# ============================================================
+# A4: Web Application Protocol Manipulation
+# ============================================================
+
+# Detect HTTP request smuggling
+alert http any any -> 10.0.2.10 80 (msg:"A4c Protocol — HTTP Request Smuggling"; content:"Content-Length:"; content:"Transfer-Encoding:"; distance:0; sid:1000230; rev:1;)
+
+# Detect HTTP response splitting
+alert http any any -> 10.0.2.10 80 (msg:"A4c Protocol — HTTP Response Splitting"; pcre:"/(\r\n\r\n|%0d%0a%0d%0a)/i"; sid:1000231; rev:1;)
+
+# Detect unusual HTTP methods
+alert http any any -> 10.0.2.10 80 (msg:"A4c Protocol — Unusual HTTP Method"; pcre:"/(TRACE|TRACK|CONNECT|DELETE|PUT)\s/"; sid:1000232; rev:1;)
+
+# Detect excessive HTTP headers
+alert http any any -> 10.0.2.10 80 (msg:"A4c Protocol — Excessive HTTP Headers"; flow:to_server; pcre:"/Host:/; content:"\r\n\r\n"; depth:0; threshold:type both, track by_src, count 20, seconds 5; sid:1000233; rev:1;)
+
+# Detect CRLF injection in headers
+alert http any any -> 10.0.2.10 80 (msg:"A4c Protocol — CRLF Injection in Headers"; pcre:"/%0d%0a|\\r\\n/i"; sid:1000234; rev:1;)

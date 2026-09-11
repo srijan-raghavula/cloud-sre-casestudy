@@ -1,0 +1,116 @@
+# Suricata Configuration
+# Reference: Khan (2016) Case Study — Infrastructure Setup
+
+%YAML 1.1
+---
+
+# === Variables ===
+vars:
+  - HOME_NET: "10.0.2.0/24"
+  - EXTERNAL_NET: "!$HOME_NET"
+  - USER_AGENTS: "|Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1)|"
+
+# === Default Logging ===
+outputs:
+  - eve-log:
+      enabled: yes
+      filetype: regular
+      filename: eve.json
+      types:
+        - http:
+            enabled: yes
+            extended: yes
+        - dns:
+            enabled: yes
+        - files:
+            enabled: yes
+            force-magic: yes
+        - smtp:
+            enabled: yes
+        - ssh:
+            enabled: yes
+        - flow:
+            enabled: yes
+            family: inet
+            states: [new, established, closed, deleted]
+        - tls:
+            enabled: yes
+
+# === Logging ===
+logging:
+  - default-loggers:
+      - console
+      - file
+    default-output-directory: /var/log/suricata
+    stats: yes
+    filters:
+      - console:
+          level: warning
+      - file:
+          level: info
+
+# === Classification Configuration ===
+classification-file: /etc/suricata/classification.config
+reference-config-file: /etc/suricata/reference.config
+
+# === Rule Files ===
+rule-files:
+  - suricata_a1.rules
+  - suricata_a4.rules
+  - emerging-exploit.rules
+  - emerging-trojan.rules
+
+# === Stream Reassembly ===
+stream:
+  memcap: 32mb
+  checksum-validation: yes
+  track-bytes: yes
+  track-sessions: both
+
+# === App Layer Protocol Detection ===
+app-layer:
+  protocols:
+    http:
+      enabled: yes
+      libhtp:
+        default-config:
+          personality: IDS
+          max-request-size: 16384
+          max-response-size: 16384
+    tls:
+      enabled: yes
+    dns:
+      enabled: yes
+
+# === Detection Engine ===
+detect:
+  profile: medium
+    # Optimized for real-time detection
+
+# === Performance Tuning ===
+pf-ring:
+  enabled: no
+
+nfq:
+  # Inline IPS mode via NFQUEUE
+  repeat-set:
+    - policy: accept
+      queue: 0
+    - policy: accept
+      queue: 1
+  rule-run: 1
+  decode-timeout: 1000
+
+# === Host-Based Rules ===
+host:
+  - 10.0.2.10
+  - 10.0.2.20
+
+# === Stream Tracking ===
+stream-trackers:
+  tcp:
+    memcap: 16mb
+  udp:
+    memcap: 8mb
+  icmp:
+    memcap: 4mb
