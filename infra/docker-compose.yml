@@ -1,4 +1,7 @@
-version: '3.8'
+# VPC topology for Cloud Security Case Study (Khan, 2016).
+# NOTE: paths are relative to the repo root — always invoke compose with
+#   `docker compose -f infra/docker-compose.yml ...` from the repo root
+#   (or add `--project-directory .`), NOT from inside infra/.
 
 services:
   # ──────────────────────────────────────────────────────────
@@ -9,8 +12,9 @@ services:
     container_name: attacker-node
     privileged: true
     volumes:
-      - ./scripts:/scripts
-      - ./data:/data
+      - ../scripts:/scripts
+      - ../config:/config:ro
+      - ../data:/data
     entrypoint: sleep infinity
     depends_on:
       - web-server
@@ -19,7 +23,7 @@ services:
       vpc-net:
         ipv4_address: 10.0.1.100
 
-  # ─────────────────────────────────────────────────────���────
+  # ──────────────────────────────────────────────────────────
   # Security Gateway — Suricata IPS
   # ──────────────────────────────────────────────────────────
   security-gateway:
@@ -29,18 +33,20 @@ services:
       - NET_ADMIN
       - NET_RAW
     volumes:
-      - ./rules:/etc/suricata/rules
-      - ./data/suricata:/var/log/suricata
-      - ./config/suricata.yaml:/etc/suricata/suricata.yaml
+      - ../rules:/etc/suricata/rules
+      - ../data/suricata:/var/log/suricata
+      - ../config/suricata.yaml:/etc/suricata/suricata.yaml
     environment:
       - SURICATA_INTERFACE=eth0
       - SURICATA_MODE=ids
       - NFQUEUE_GROUP=1
+    # Rule sets come from rule-files in suricata.yaml (suricata
+    # accepts only a single -S flag, so both sets live in the config).
     command: >
       suricata -c /etc/suricata/suricata.yaml
-      -S /etc/suricata/rules/suricata_a1.rules
-      -S /etc/suricata/rules/suricata_a4.rules
+      -i eth0
       -l /var/log/suricata
+      --set default-rule-path=/etc/suricata/rules
       --set app-layer.protocols.http.enabled=true
     depends_on:
       - web-server
@@ -56,13 +62,14 @@ services:
     image: vulnerables/web-dvwa
     container_name: web-server
     ports:
-      - "80:80"
-      - "443:443"
+      # NOTE: host port 80 is intercepted on some dev boxes — serve on 8080.
+      - "8080:80"
+      - "8443:443"
     environment:
       - DVWA_USERNAME=admin
       - DVWA_PASSWORD=password
     volumes:
-      - ./data/nginx_logs:/var/log/nginx
+      - ../data/nginx_logs:/var/log/nginx
     networks:
       vpc-net:
         ipv4_address: 10.0.2.10
@@ -80,8 +87,8 @@ services:
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     volumes:
-      - ./data/db_data:/var/lib/postgresql/data
-      - ./data/db_logs:/var/log/postgresql
+      - ../data/db_data:/var/lib/postgresql/data
+      - ../data/db_logs:/var/log/postgresql
     networks:
       vpc-net:
         ipv4_address: 10.0.2.20
@@ -91,14 +98,14 @@ services:
   # ──────────────────────────────────────────────────────────
   ml-engine:
     build:
-      context: .
+      context: ..
       dockerfile: ml/Dockerfile
     container_name: ml-engine
     volumes:
-      - ./ml:/app
-      - ./data:/data
-      - ./models:/models
-    command: python3 /app/ml_detector.py --mode detect
+      - ../ml:/app
+      - ../data:/data
+      - ../ml/models:/models
+    command: python3 /app/ml_detector.py --mode detect --eve-json /data/suricata/eve.json --model-path /models/idps_model.joblib --threshold 0.7
     depends_on:
       - security-gateway
     networks:
@@ -106,17 +113,18 @@ services:
         ipv4_address: 10.0.2.5
 
   # ──────────────────────────────────────────────────────────
-  # Feature Extractor Node
+  # Feature Extractor Node (driven via docker exec by run-everything)
   # ──────────────────────────────────────────────────────────
   feature-extractor:
     build:
-      context: .
+      context: ..
       dockerfile: scripts/Dockerfile
     container_name: feature-extractor
+    entrypoint: sleep infinity
     volumes:
-      - ./scripts:/app
-      - ./data:/data
-    command: python3 /app/feature_extractor.py --interface eth0 --backend scapy --duration 300
+      - ../scripts:/app
+      - ../config:/config:ro
+      - ../data:/data
     depends_on:
       - security-gateway
     networks:

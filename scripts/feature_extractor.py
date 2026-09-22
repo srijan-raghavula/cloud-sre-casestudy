@@ -37,7 +37,6 @@ except ImportError:
 
 try:
     from scapy.all import sniff, IP, TCP, UDP, conf
-    from scapy.layers.inet import TCP_OL
 
     HAS_SCAPY = True
 except ImportError:
@@ -300,7 +299,9 @@ class PySharkExtractor:
 
     def export_flows(self, output_path: str):
         """Export all captured flows to CSV format."""
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        parent = os.path.dirname(output_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         records = [flow.to_dict() for flow in self.flows.values()]
         import csv
 
@@ -309,6 +310,11 @@ class PySharkExtractor:
                 writer = csv.DictWriter(f, fieldnames=records[0].keys())
                 writer.writeheader()
                 writer.writerows(records)
+        else:
+            template = FlowRecord("template", "0.0.0.0", "0.0.0.0", 0, 0, "TCP")
+            with open(output_path, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=template.to_dict().keys())
+                writer.writeheader()
         print(f"[INFO] Exported {len(records)} flows to {output_path}")
         return records
 
@@ -385,9 +391,16 @@ class ScapyExtractor:
             if flags & 0x20:
                 flow.flag_urg += 1  # URG
 
-    def start_capture(self, output_file: str = None, duration: int = 300):
-        """Start live packet capture with Scapy."""
+    def start_capture(
+        self, output_file: str = None, duration: int = 300, pcap_out: str = None
+    ):
+        """Start live packet capture with Scapy.
+
+        If pcap_out is given, raw packets are also written to that PCAP
+        file (for offline Suricata analysis). No root needed to *write*.
+        """
         self._running = True
+        captured = []
 
         def _timeout_check():
             time.sleep(duration)
@@ -399,22 +412,63 @@ class ScapyExtractor:
         def _packet_handler(pkt):
             if not self._running:
                 return
+            if pcap_out is not None:
+                captured.append(pkt)
             self._process_packet(pkt)
 
-        sniff(
-            iface=self.interface,
-            filter=self.bpf_filter,
-            prn=_packet_handler,
-            store=False,
-            timeout=duration,
-        )
+        try:
+            sniff(
+                iface=self.interface,
+                filter=self.bpf_filter,
+                prn=_packet_handler,
+                store=False,
+                timeout=duration,
+            )
+        except PermissionError:
+            print(
+                f"[WARN] No permission to capture on {self.interface} "
+                "(need root/CAP_NET_RAW). Skipping live capture.",
+                file=sys.stderr,
+            )
+        except Exception as e:
+            print(
+                f"[WARN] Capture on {self.interface} failed ({e}). "
+                "Skipping live capture.",
+                file=sys.stderr,
+            )
+
+        if pcap_out is not None:
+            parent = os.path.dirname(pcap_out)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            if captured:
+                from scapy.utils import wrpcap
+
+                wrpcap(pcap_out, captured)
+            print(f"[INFO] Wrote {len(captured)} packets to {pcap_out}.")
+
+    def read_pcap(self, pcap_path: str):
+        """Read packets from an offline PCAP file (no root required)."""
+        if not HAS_SCAPY:
+            raise ImportError("Scapy not installed: pip install scapy")
+        if not os.path.exists(pcap_path):
+            raise FileNotFoundError(f"PCAP not found: {pcap_path}")
+        from scapy.utils import rdpcap
+
+        packets = rdpcap(pcap_path)
+        print(f"[INFO] Reading {len(packets)} packets from {pcap_path}...")
+        for pkt in packets:
+            self._process_packet(pkt)
+        print(f"[INFO] Processed {len(packets)} packets, {len(self.flows)} flows.")
 
     def stop_capture(self):
         self._running = False
 
     def export_flows(self, output_path: str):
         """Export all captured flows to CSV."""
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        parent = os.path.dirname(output_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         records = [flow.to_dict() for flow in self.flows.values()]
         import csv
 
@@ -423,6 +477,13 @@ class ScapyExtractor:
                 writer = csv.DictWriter(f, fieldnames=records[0].keys())
                 writer.writeheader()
                 writer.writerows(records)
+        else:
+            # Always create the output file so downstream steps don't break.
+            # Write a header-only CSV using an empty FlowRecord template.
+            template = FlowRecord("template", "0.0.0.0", "0.0.0.0", 0, 0, "TCP")
+            with open(output_path, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=template.to_dict().keys())
+                writer.writeheader()
         print(f"[INFO] Exported {len(records)} flows to {output_path}")
         return records
 
@@ -453,15 +514,23 @@ class FeaturePipeline:
             f"[INFO] Feature extractor initialized with {self.backend} backend on {self.interface}"
         )
 
-    def start(self, output_file: str = None, duration: int = 300):
+    def start(
+        self,
+        output_file: str = None,
+        duration: int = 300,
+        pcap: str = None,
+        pcap_out: str = None,
+    ):
         """Start feature extraction pipeline."""
         if self.extractor is None:
             self.initialize()
         self.extractor.export_fn = output_file
-        if self.backend == "pyshark":
+        if pcap:
+            self.extractor.read_pcap(pcap)
+        elif self.backend == "pyshark":
             thread = self.extractor.start_capture(output_file=output_file)
         else:
-            self.extractor.start_capture(duration=duration)
+            self.extractor.start_capture(duration=duration, pcap_out=pcap_out)
         return self.extractor
 
     def stop(self):
@@ -486,6 +555,11 @@ def main():
     )
     parser.add_argument("--pcap", default=None, help="Read from offline PCAP file")
     parser.add_argument(
+        "--pcap-out",
+        default=None,
+        help="Also write live-captured packets to this PCAP file",
+    )
+    parser.add_argument(
         "--output", default="data/flow_features.csv", help="Output CSV path"
     )
     parser.add_argument(
@@ -504,8 +578,16 @@ def main():
     if args.ml_endpoint:
         pipeline.set_callback(lambda pkt: None)  # Connect to ML daemon
 
-    print(f"[INFO] Starting feature extraction ({args.backend}, {args.duration}s)...")
-    pipeline.start(output_file=args.output, duration=args.duration)
+    if args.pcap:
+        print(f"[INFO] Starting offline feature extraction from {args.pcap}...")
+        pipeline.start(output_file=args.output, pcap=args.pcap)
+    else:
+        print(
+            f"[INFO] Starting feature extraction ({args.backend}, {args.duration}s)..."
+        )
+        pipeline.start(
+            output_file=args.output, duration=args.duration, pcap_out=args.pcap_out
+        )
     pipeline.stop()
 
     flows = pipeline.extractor.export_flows(args.output)

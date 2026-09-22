@@ -143,8 +143,8 @@ class ModelTrainer:
             )
         elif self.model_type == "hybrid":
             return {
-                "isolation": IsolationForest(contamination=0.1, random_state=42),
-                "classifier": RandomForestClassifier(n_estimators=50, random_state=42),
+                "isolation": IsolationForest(contamination=0.05, random_state=42),
+                "classifier": RandomForestClassifier(n_estimators=100, random_state=42),
             }
         else:
             raise ValueError(f"Unknown model type: {self.model_type}")
@@ -191,9 +191,23 @@ class ModelTrainer:
             iso_preds = self.model["isolation"].predict(X_scaled)
             clf_preds = self.model["classifier"].predict(X_scaled)
             clf_probs = self.model["classifier"].predict_proba(X_scaled)
-            # Use hybrid: isolation forest for initial detection, RF for confidence
-            combined_preds = np.where(iso_preds == -1, 1, clf_preds)
-            confidence = clf_probs.max(axis=1)
+            # Hybrid policy: the supervised classifier leads (it learns the
+            # benign/attack boundary); isolation votes only add suspicion.
+            # score_samples is ~centered at 0 (negative = anomalous);
+            # map per-sample (batch-size independent): 0.5 - score.
+            iso_scores = self.model["isolation"].score_samples(X_scaled)
+            anomaly = np.clip(0.5 - iso_scores, 0.0, 1.0)
+            clf_conf = clf_probs.max(axis=1)
+            iso_only = (iso_preds == -1) & (clf_preds == 0)
+            combined_preds = np.where(iso_only, 1, clf_preds)
+            # Classifier-backed attacks carry full confidence; isolation-only
+            # flags are capped below the default threshold so they surface
+            # as suspicious, never confirmed, without classifier support.
+            confidence = np.where(
+                iso_only,
+                np.minimum(clf_conf, 0.65),
+                np.maximum(clf_conf, np.where(clf_preds == 1, anomaly, 0.0)),
+            )
             return combined_preds, confidence
         else:
             preds = self.model.predict(X_scaled)
@@ -205,7 +219,9 @@ class ModelTrainer:
 
     def save(self, path: str):
         """Save trained model and scaler."""
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         model_data = {
             "model_type": self.model_type,
             "scaler": self.scaler,
@@ -270,6 +286,30 @@ class MLDetectorDaemon:
         except json.JSONDecodeError:
             return None
 
+    @staticmethod
+    def _flow_duration_ms(flow: Dict) -> float:
+        """Duration in ms from eve flow record (duration/start+end/age)."""
+        if flow.get("duration") is not None:
+            try:
+                return float(flow["duration"]) * 1000
+            except (TypeError, ValueError):
+                pass
+        try:
+            from datetime import datetime as _dt
+
+            def _parse(ts):
+                return _dt.fromisoformat(str(ts).replace("+0000", "+00:00"))
+
+            start, end = flow.get("start"), flow.get("end")
+            if start and end:
+                return max((_parse(end) - _parse(start)).total_seconds() * 1000, 0.0)
+        except Exception:
+            pass
+        try:
+            return float(flow.get("age", 0)) * 1000
+        except (TypeError, ValueError):
+            return 0.0
+
     def extract_features_from_event(self, event: Dict) -> Optional[FlowFeature]:
         """Extract flow features from Suricata eve.json event."""
         try:
@@ -277,24 +317,43 @@ class MLDetectorDaemon:
                 return None
 
             flow = event.get("flow", {})
+            tcp = event.get("tcp", {})
+
+            # Duration: eve flow records carry start/end timestamps (or age),
+            # not a 'duration' field — parse what exists.
+            duration_ms = self._flow_duration_ms(flow)
+            # TCP flags: eve reports booleans per direction, not counters.
+            flag_syn = flow.get("syn_count", 1 if tcp.get("syn") else 0)
+            flag_ack = flow.get("ack_count", 1 if tcp.get("ack") else 0)
+            flag_fin = flow.get("fin_count", 1 if tcp.get("fin") else 0)
+            flag_rst = flow.get("rst_count", 1 if tcp.get("rst") else 0)
+            flag_psh = flow.get("psh_count", 1 if tcp.get("psh") else 0)
+            flag_urg = flow.get("urg_count", 0)
+            # Packet lengths: eve flows carry totals, not per-packet sizes —
+            # estimate the mean from bytes/packets (real) instead of 0
+            # (impossible value that skews every live flow into outliers).
+            total_bytes = flow.get("bytes_toserver", 0) + flow.get("bytes_toclient", 0)
+            total_pkts = flow.get("pkts_toserver", 0) + flow.get("pkts_toclient", 0)
+            pkt_len_mean = round(total_bytes / max(total_pkts, 1), 2)
+            pkt_len_std = round(pkt_len_mean / 2, 2)
             feature = FlowFeature(
                 flow_id=flow.get("flow_id", ""),
                 timestamp=event.get("timestamp", time.time()),
-                duration_ms=flow.get("duration", 0) * 1000,
+                duration_ms=duration_ms,
                 total_fwd_pkts=flow.get("pkts_toserver", 0),
                 total_bwd_pkts=flow.get("pkts_toclient", 0),
                 total_pkts=flow.get("pkts_toserver", 0) + flow.get("pkts_toclient", 0),
                 flow_bytes_per_sec=flow.get("bytes_toserver", 0)
                 + flow.get("bytes_toclient", 0),
                 flow_packets_per_sec=0,  # Calculated below
-                pkt_len_mean=0,
-                pkt_len_std=0,
-                flag_syn=flow.get("syn_count", 0),
-                flag_ack=flow.get("ack_count", 0),
-                flag_fin=flow.get("fin_count", 0),
-                flag_rst=flow.get("rst_count", 0),
-                flag_psh=flow.get("psh_count", 0),
-                flag_urg=flow.get("urg_count", 0),
+                pkt_len_mean=pkt_len_mean,
+                pkt_len_std=pkt_len_std,
+                flag_syn=flag_syn,
+                flag_ack=flag_ack,
+                flag_fin=flag_fin,
+                flag_rst=flag_rst,
+                flag_psh=flag_psh,
+                flag_urg=flag_urg,
             )
 
             # Calculate derived features
@@ -443,6 +502,130 @@ class MLDetectorDaemon:
         else:
             return "low"
 
+    def process_file(self, eve_json_path: str = None, output: str = None) -> Dict:
+        """Single-pass batch processing of eve.json (offline pipeline).
+
+        Reads the whole file once, classifies every event, writes a JSON
+        report, and returns. Exits (unlike start(), which polls forever).
+        """
+        path = eve_json_path or self.eve_json_path
+        if not os.path.exists(path):
+            print(
+                f"[ML DETECTOR] No eve.json at {path} "
+                "(Suricata not running). Skipping batch detection."
+            )
+            return {"total_flows": 0, "alerts": 0, "skipped": True}
+
+        events = 0
+        features: List[FlowFeature] = []
+        suricata_flagged: List[bool] = []
+        with open(path, "r") as f:
+            for line in f:
+                event = self.parse_eve_json(line)
+                if event is None:
+                    continue
+                events += 1
+                feature = self.extract_features_from_event(event)
+                if feature is not None:
+                    features.append(feature)
+                    flow = event.get("flow", {})
+                    suricata_flagged.append(bool(flow.get("alerted", False)))
+
+        if not features:
+            print("[ML DETECTOR] Batch complete: no flow events found.")
+            return {"total_flows": 0, "alerts": 0, "total_events": events}
+
+        # Vectorized classification: one predict() call for the whole batch
+        # (per-flow predict + per-alert iptables would take ~10min on floods).
+        cols = ModelTrainer.FEATURE_COLUMNS
+        X = np.array(
+            [
+                [
+                    getattr(ft, "duration_ms", 0),
+                    getattr(ft, "total_pkts", 0),
+                    getattr(ft, "flow_bytes_per_sec", 0),
+                    getattr(ft, "flow_packets_per_sec", 0),
+                    getattr(ft, "pkt_len_mean", 0),
+                    getattr(ft, "pkt_len_std", 0),
+                    getattr(ft, "flag_syn", 0),
+                    getattr(ft, "flag_ack", 0),
+                    getattr(ft, "flag_fin", 0),
+                    getattr(ft, "flag_rst", 0),
+                    getattr(ft, "flag_psh", 0),
+                    getattr(ft, "flag_urg", 0),
+                ]
+                for ft in features
+            ],
+            dtype=float,
+        )
+        _ = cols  # FEATURE_COLUMNS documents the vector layout above.
+        start = time.time()
+        preds, confs = self.trainer.predict(X)
+        avg_latency_ms = (time.time() - start) * 1000 / max(len(features), 1)
+
+        for feature, pred, conf, s_alerted in zip(
+            features, preds, confs, suricata_flagged
+        ):
+            pred, conf = int(pred), float(conf)
+            feature.detection_time_ms = avg_latency_ms
+            if pred == 1 and conf >= self.threshold:
+                self._alert_id_counter += 1
+                self.alerts.append(
+                    DetectionAlert(
+                        alert_id=f"ML-{self._alert_id_counter:06d}",
+                        flow_id=feature.flow_id,
+                        attack_category=self._categorize_attack(feature),
+                        severity=self._severity_from_confidence(conf),
+                        confidence=conf,
+                        detection_time=avg_latency_ms,
+                        feature_vector=feature.__dict__,
+                        timestamp=datetime.now().isoformat(),
+                        # Offline batch: analyze, don't enforce.
+                        action_taken="logged_only",
+                    )
+                )
+                self.stats["total_detections"] += 1
+                self.stats["confirmed_attacks"] += 1
+                if s_alerted:
+                    self.stats["suricata_correlated"] += 1
+                if avg_latency_ms > 50:
+                    self.stats["latency_violations"] += 1
+            elif pred == 1:
+                self.stats["total_detections"] += 1
+                self.stats["suspicious_alerts"] += 1
+                if s_alerted:
+                    self.stats["suricata_correlated"] += 1
+            else:
+                self.stats["benign_classified"] += 1
+
+        report = self.generate_report()
+        report["eve_json_path"] = path
+        report["total_events"] = events
+        report["threshold"] = self.threshold
+        report["suricata_flagged_flows"] = sum(1 for f in suricata_flagged if f)
+        report["ml_flagged_flows"] = int(
+            self.stats.get("confirmed_attacks", 0)
+            + self.stats.get("suspicious_alerts", 0)
+        )
+
+        if output:
+            parent = os.path.dirname(output)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(output, "w") as f:
+                json.dump(report, f, indent=2)
+            print(f"[ML DETECTOR] Batch report saved to {output}")
+
+        stats = report["statistics"]
+        print(
+            f"[ML DETECTOR] Batch complete: {events} events, "
+            f"{stats['confirmed_attacks']} attacks, "
+            f"{stats['suspicious_alerts']} suspicious, "
+            f"{stats['benign_classified']} benign, "
+            f"{stats.get('suricata_correlated', 0)} Suricata-corroborated."
+        )
+        return report
+
     def start(self, eve_json_path: str = None, batch_size: int = 100):
         """Start monitoring Suricata eve.json."""
         self._running = True
@@ -488,9 +671,10 @@ class MLDetectorDaemon:
             "confirmed_attacks": self.stats.get("confirmed_attacks", 0),
             "suspicious_alerts": self.stats.get("suspicious_alerts", 0),
             "benign_classified": self.stats.get("benign_classified", 0),
+            "suricata_correlated": self.stats.get("suricata_correlated", 0),
             "latency_violations": self.stats.get("latency_violations", 0),
             "avg_detection_latency_ms": (
-                sum(a.detection_time_ms for a in self.alerts) / len(self.alerts)
+                sum(a.detection_time for a in self.alerts) / len(self.alerts)
                 if self.alerts
                 else 0
             ),
@@ -520,6 +704,38 @@ class SyntheticDataGenerator:
         """Generate normal traffic flow features."""
         features = []
         for _ in range(n):
+            # 25% fast LAN micro-flows (sub-second HTTP-like exchanges) so
+            # the model learns the high-rate-but-benign region seen live.
+            if np.random.rand() < 0.25:
+                duration = float(np.random.exponential(0.02) + 0.001)
+                fwd_pkts = int(np.random.poisson(6))
+                bwd_pkts = int(np.random.poisson(4))
+                pkt_len_mean = float(np.random.normal(350, 80))
+                pkt_len_std = float(np.random.exponential(40))
+                bytes_sec = (
+                    (fwd_pkts + bwd_pkts) * max(pkt_len_mean, 1) / max(duration, 0.001)
+                )
+                pkt_sec = (fwd_pkts + bwd_pkts) / max(duration, 0.001)
+                flags = [
+                    1,
+                    int(np.random.poisson(3)),
+                    int(np.random.poisson(1)),
+                    0,
+                    int(np.random.poisson(1)),
+                    0,
+                ]
+                features.append(
+                    [
+                        duration,
+                        fwd_pkts + bwd_pkts,
+                        bytes_sec,
+                        pkt_sec,
+                        pkt_len_mean,
+                        pkt_len_std,
+                    ]
+                    + flags
+                )
+                continue
             duration = np.random.exponential(100)
             fwd_pkts = np.random.poisson(50)
             bwd_pkts = np.random.poisson(30)
@@ -553,8 +769,28 @@ class SyntheticDataGenerator:
         """Generate attack traffic flow features."""
         features = []
         for _ in range(n):
-            attack_type = np.random.choice(["port_scan", "dos", "sqli", "xss"])
-            if attack_type == "port_scan":
+            attack_type = np.random.choice(
+                ["port_scan", "dos", "sqli", "xss", "syn_scan_micro"]
+            )
+            if attack_type == "syn_scan_micro":
+                # Short SYN sweep flows as seen live: single probes, half
+                # answered by RST (closed ports), half unanswered (filtered).
+                duration = float(np.random.uniform(0.005, 0.5))
+                fwd_pkts = int(np.random.randint(1, 6))
+                answered = np.random.rand() < 0.5
+                bwd_pkts = int(np.random.poisson(1)) if answered else 0
+                pkt_len_mean = float(np.random.normal(60, 10))
+                pkt_len_std = float(np.random.exponential(8))
+                bytes_sec = fwd_pkts * max(pkt_len_mean, 1) / max(duration, 0.001)
+                flags = [
+                    fwd_pkts,
+                    0,
+                    0,
+                    int(np.random.poisson(2)) if answered else 0,
+                    0,
+                    0,
+                ]
+            elif attack_type == "port_scan":
                 duration = np.random.uniform(1, 5)
                 fwd_pkts = np.random.randint(100, 1000)
                 bwd_pkts = 0
@@ -645,6 +881,12 @@ def main():
         default="data/results/ml_detection_report.json",
         help="Output report path",
     )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Single-pass batch detection over eve.json, then exit "
+        "(for offline pipeline). Without it, detect polls forever.",
+    )
 
     args = parser.parse_args()
 
@@ -668,6 +910,12 @@ def main():
         trainer.save(args.model_path)
 
     elif args.mode == "detect":
+        if not os.path.exists(args.eve_json):
+            print(
+                f"[ML DETECTOR] No eve.json at {args.eve_json} "
+                "(Suricata not running). Skipping live detection.",
+            )
+            return
         detector = MLDetectorDaemon(
             model_path=args.model_path,
             model_type=args.model_type,
@@ -676,7 +924,13 @@ def main():
         )
         if os.path.exists(args.model_path):
             detector.trainer.load(args.model_path)
-        detector.start()
+        if args.once:
+            detector.process_file(args.eve_json, args.output)
+            return
+        try:
+            detector.start()
+        except KeyboardInterrupt:
+            detector.stop()
 
     elif args.mode == "demo":
         print("[ML DETECTOR] Running demo with synthetic data...")
@@ -722,7 +976,9 @@ def main():
             "test_samples": len(X_test),
             "timestamp": datetime.now().isoformat(),
         }
-        os.makedirs(os.path.dirname(args.output), exist_ok=True)
+        parent = os.path.dirname(args.output)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(args.output, "w") as f:
             json.dump(report, f, indent=2)
         print(f"\n[ML DETECTOR] Report saved to {args.output}")

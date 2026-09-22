@@ -1,0 +1,1 @@
+timestamp,flow_id,src_ip,dst_ip,src_port,dst_port,protocol,duration_ms,total_fwd_pkts,total_bwd_pkts,total_pkts,total_fwd_bytes,total_bwd_bytes,pkt_len_mean,pkt_len_std,flow_bytes_per_sec,flow_packets_per_sec,flag_syn,flag_ack,flag_fin,flag_rst,flag_psh,flag_urg

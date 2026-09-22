@@ -4,6 +4,12 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpcap0.8 \
+    nmap \
+    hping3 \
+    openssh-client \
+    stress-ng \
+    tcpdump \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /tmp/requirements.txt

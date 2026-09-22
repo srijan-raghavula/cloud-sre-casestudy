@@ -70,12 +70,34 @@ run-web-attack: install ## Execute SQLi and XSS attacks against target 10.0.2.10
 # ──────────────────────────────────────────────────────────
 run-suricata: install ## Start Suricata IDS/IPS with A1+A4 rule sets
 	@echo "[SURICATA] Starting Suricata IPS with custom rules..."
+	cat rules/suricata_a1.rules rules/suricata_a4.rules > data/suricata/combined.rules
 	suricata -c config/suricata.yaml \
-		-S rules/suricata_a1.rules \
-		-S rules/suricata_a4.rules \
+		-S data/suricata/combined.rules \
 		-l data/suricata \
 		--set app-layer.protocols.http.enabled=true
 	@echo "[SURICATA] Suricata IDS/IPS running. Logs in data/suricata/"
+
+# ──────────────────────────────────────────────────────────
+# Synthetic PCAP + Suricata Offline (no root needed)
+# ──────────────────────────────────────────────────────────
+gen-pcap: install ## Generate synthetic attack PCAP (A1, A4c + benign)
+	@echo "[PCAP] Generating synthetic attack traffic..."
+	.venv/bin/python scripts/generate_pcap.py --output data/capture.pcap --flows 20
+	@echo "[PCAP] PCAP ready: data/capture.pcap"
+
+run-suricata-offline: gen-pcap ## Run Suricata offline via Docker on synthetic PCAP
+	@echo "[SURICATA] Running offline detection on data/capture.pcap..."
+	mkdir -p data/suricata
+	cat rules/suricata_a1.rules rules/suricata_a4.rules > data/suricata/combined.rules
+	rm -f data/suricata/eve.json
+	docker run --rm \
+		-v "$(CURDIR)/data:/data:rw" \
+		-v "$(CURDIR)/data/suricata/combined.rules:/rules/combined.rules:ro" \
+		-v "$(CURDIR)/config/suricata.yaml:/etc/suricata/suricata.yaml:ro" \
+		jasonish/suricata:latest suricata -c /etc/suricata/suricata.yaml \
+		-S /rules/combined.rules -r /data/capture.pcap -l /data/suricata \
+		--set stream.checksum-validation=no
+	@echo "[SURICATA] Offline detection complete. Logs in data/suricata/"
 
 # ──────────────────────────────────────────────────────────
 # ML Anomaly Detection (Config C)
@@ -114,17 +136,26 @@ run-ml-daemon: install ## Start the ML detector daemon listening to Suricata eve
 # ──────────────────────────────────────────────────────────
 docker-up: ## Start the full VPC topology using Docker Compose
 	@echo "[DOCKER] Bringing up VPC infrastructure..."
-	docker compose -f infra/docker-compose.yml up -d
+	docker compose --project-name cloud-sre -f infra/docker-compose.yml --env-file .env up -d --build
 	@echo "[DOCKER] VPC infrastructure running. Access DVWA at http://localhost"
 
 docker-down: ## Stop and remove all Docker containers
 	@echo "[DOCKER] Shutting down VPC infrastructure..."
-	docker compose -f infra/docker-compose.yml down
+	docker compose --project-name cloud-sre -f infra/docker-compose.yml --env-file .env down
 	@echo "[DOCKER] All containers stopped."
 
 docker-logs: ## Show logs from all running containers
 	@echo "[DOCKER] Streaming container logs..."
-	docker compose -f infra/docker-compose.yml logs -f
+	docker compose --project-name cloud-sre -f infra/docker-compose.yml --env-file .env logs -f
+
+# ──────────────────────────────────────────────────────────
+# Full Live Demo — VPC + Attacks + Suricata + ML
+# ──────────────────────────────────────────────────────────
+run-everything: install ## Full live demo: VPC up → live attacks → Suricata → ML → down
+	@echo "[EVERYTHING] Starting full live demo (VPC + attacks + detection)..."
+	@echo "[EVERYTHING] Tip: KEEP_UP=1 make run-everything (leave VPC up)"
+	chmod +x scripts/run_everything.sh scripts/wait_for_infra.sh
+	KEEP_UP=$(KEEP_UP) CAPTURE_SECS=$(CAPTURE_SECS) ATTACK_SECS=$(ATTACK_SECS) bash scripts/run_everything.sh
 
 # ──────────────────────────────────────────────────────────
 # Test Suite
@@ -137,16 +168,29 @@ test: install ## Run the test suite to verify all modules
 # ──────────────────────────────────────────────────────────
 # Data Pipeline — End-to-End
 # ──────────────────────────────────────────────────────────
-run-pipeline: install ## Run full pipeline: attack → feature extraction → ML detection
+run-pipeline: install ## Run full pipeline: attack → pcap → features → Suricata → ML
 	@echo "[PIPELINE] Starting end-to-end detection pipeline..."
-	@echo "[PIPELINE] Step 1/4: Running attacks..."
-	.venv/bin/python scripts/attack_automation.py --all --duration 30 --output-dir data/results
-	@echo "[PIPELINE] Step 2/4: Extracting features..."
-	.venv/bin/python scripts/feature_extractor.py --backend scapy --interface eth0 --duration 30 --output data/flow_features.csv
-	@echo "[PIPELINE] Step 3/4: Training ML models..."
+	@echo "[PIPELINE] Step 1/6: Running attacks..."
+	.venv/bin/python scripts/attack_automation.py --all --duration 5 --output data/results
+	@echo "[PIPELINE] Step 2/6: Generating synthetic PCAP..."
+	.venv/bin/python scripts/generate_pcap.py --output data/capture.pcap --flows 20
+	@echo "[PIPELINE] Step 3/6: Extracting features from PCAP..."
+	.venv/bin/python scripts/feature_extractor.py --pcap data/capture.pcap --output data/flow_features.csv
+	@echo "[PIPELINE] Step 4/6: Running Suricata offline (Docker)..."
+	mkdir -p data/suricata
+	cat rules/suricata_a1.rules rules/suricata_a4.rules > data/suricata/combined.rules
+	rm -f data/suricata/eve.json
+	docker run --rm \
+		-v "$(CURDIR)/data:/data:rw" \
+		-v "$(CURDIR)/data/suricata/combined.rules:/rules/combined.rules:ro" \
+		-v "$(CURDIR)/config/suricata.yaml:/etc/suricata/suricata.yaml:ro" \
+		jasonish/suricata:latest suricata -c /etc/suricata/suricata.yaml \
+		-S /rules/combined.rules -r /data/capture.pcap -l /data/suricata \
+		--set stream.checksum-validation=no
+	@echo "[PIPELINE] Step 5/6: Training ML models..."
 	.venv/bin/python ml/ml_detector.py --mode train --model-type hybrid --train-samples 11000 --model-path ml/models/idps_model.joblib
-	@echo "[PIPELINE] Step 4/4: Running detection..."
-	.venv/bin/python ml/ml_detector.py --mode detect --model-path ml/models/idps_model.joblib --eve-json data/suricata/eve.json --threshold 0.7
+	@echo "[PIPELINE] Step 6/6: Running batch ML detection on eve.json..."
+	.venv/bin/python ml/ml_detector.py --mode detect --model-path ml/models/idps_model.joblib --eve-json data/suricata/eve.json --threshold 0.7 --once --output data/results/ml_detection_report.json
 	@echo "[PIPELINE] End-to-end pipeline complete!"
 
 # ──────────────────────────────────────────────────────────
@@ -154,7 +198,8 @@ run-pipeline: install ## Run full pipeline: attack → feature extraction → ML
 # ──────────────────────────────────────────────────────────
 clean: ## Remove all generated data, results, and cached files
 	@echo "[CLEAN] Removing generated files..."
-	rm -rf data/results/ data/suricata/ data/flow_features.csv data/nmap_*.xml
+	rm -rf data/results/ data/suricata/ data/flow_features.csv data/live_flows.csv
+	rm -rf data/capture.pcap data/capture-live.pcap data/nmap_*.xml
 	rm -rf ml/models/ .ruff_cache/ __pycache__/ .venv/
 	find . -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 	find . -name "*.pyc" -delete 2>/dev/null || true
